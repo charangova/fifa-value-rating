@@ -1,0 +1,330 @@
+---
+title: "FIFA attribute based value rating"
+author: "Yixuan Deng, Charan Govarthanaraj, Monte Thomas"
+date: "2023-12-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+project_data_1 <- read.csv("~/Downloads/player statistics (For Analysis).csv")
+library(glmnet)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(ggcorrplot)
+library(corrplot)
+install.packages("htmltools")
+install.packages("devtools")
+devtools::install_github("YuLab-SMU/ggtree")
+library(ggtree)
+library("ape")
+library(gridExtra)
+
+```
+In this report, we delve into the extent to which a player's value is affected by each of his characteristics. We have selected a player's market value as the dependent variable, while the player's various physical metrics serve as the independent variables. 
+```{r}
+full_model = lm(value ~ . -player - country, data = project_data_1)
+summary(full_model)
+par(mfrow = c(2,2))
+plot(full_model)
+
+library(MASS)
+boxcox_model <- boxcox(full_model, plotit = TRUE)
+lambda <- boxcox_model$x[which.max(boxcox_model$y)]
+print(lambda)
+
+transformed_model <- lm(log(value) ~ . -player - country, data = project_data_1)
+summary(transformed_model)
+par(mfrow = c(2,2))
+plot(transformed_model)
+
+p_values <- summary(transformed_model)$coefficients[, "Pr(>|t|)"]
+print(p_values)
+
+significant_variables <- names(p_values[p_values < 0.05 & names(p_values) != "(Intercept)"])
+
+print(significant_variables)
+smallest_model <- lm(log(value) ~ ., 
+                     data = project_data_1[, c("value", significant_variables)])
+summary(smallest_model)
+par(mfrow = c(2,2))
+plot(smallest_model)
+```
+
+
+
+Based on the previous analysis, our team has elaborated on the advantages of using the natural logarithm of a player's value as a variable. Therefore, in all subsequent regression analyses, we will use the natural logarithm of player's value for the study in order to obtain more accurate and insightful analysis results.
+
+```{r}
+project_data_1$country <- as.factor(project_data_1$country)
+project_data_1$goal_keeper <- 0
+project_data_1[project_data_1$gk_reflexes>40,]$goal_keeper <- 1
+y <- log(project_data_1$value)
+x <- project_data_1[,-which(names(project_data_1)=="value" | names(project_data_1)=="player")]
+```
+
+Before conducting regression analysis, our first step is to analyze the distribution pattern of the independent variable (X) in depth. Here, we examine the correlation coefficients between the independent variables by constructing a correlation matrix. The main idea is to identify potential multicollinearity problems, which is a key prerequisite check in regression analysis.
+
+The presence of multicollinearity may make ordinary least squares (OLS) estimation problematic or even unsolvable. Even if it does not result in complete multicollinearity, if there is a high degree of correlation between the variables, this can lead to a significant increase in the variance of the estimate. This expansion of variance can weaken the accuracy of statistical hypothesis testing and affect the reliability of model estimation. Therefore, identifying and dealing with these correlations is critical to ensure the validity and accuracy of regression analysis.
+
+
+```{r}
+numerical_data <- select_if(project_data_1, is.numeric)
+cor_matrix <- cor(numerical_data)
+ggcorrplot(cor_matrix, method ="square", lab_size = TRUE)+theme(axis.text.x = element_text(size=8),
+                                                                axis.text.y = element_text(size=8))
+```
+
+From this figure we can clearly see that the dark red areas and the dark purple areas represent issues where there is a high correlation between some of the variables, so further variable selection, either manually or using automated selection (e.g., lasso as well as the ridge method) is necessary.
+
+Next, we consider the use of clustering analysis to further analyze whether clustering exists between X's.
+
+```{r}
+x[,-1] <- lapply(x[,-1], as.numeric)
+numerical_x <- select_if(x, is.numeric)
+#Perform clustering
+dist_matrix <- dist(numerical_x)
+hc <- hclust(dist_matrix)
+tree <- as.phylo(hc)
+ggtree(tree) +
+  geom_tiplab(size = 0.5) +  
+  theme_tree2()  
+```
+
+We first use hierarchical clustering for our analysis, as one can see from this figure above, it is difficult to accurately represent the results of hierarchical clustering using a tree diagram because of the excessive number of variables. 
+
+Therefore, we consider using the tsne plot to compress the high-dimensional data into two dimensions to better visualize the results of this cluster.
+
+```{r}
+
+library("Rtsne")
+tsne_results <- Rtsne(unique(numerical_x), 
+                      dims = 2, perplexity = 30)
+hc <- hclust(dist(tsne_results$Y))
+
+```
+
+```{r}
+clusters <- cutree(hc, k = 3)
+tsne_df <- as.data.frame(tsne_results$Y)
+tsne_df$cluster <- as.factor(clusters)
+ggplot(tsne_df, aes(x = V1, y = V2, color = cluster)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "t-SNE with Hierarchical Clustering",
+       x = "t-SNE 1",
+       y = "t-SNE 2",
+       color = "Cluster")
+clusters <- cutree(hc, k = 2)
+tsne_df <- as.data.frame(tsne_results$Y)
+tsne_df$cluster <- as.factor(clusters)
+ggplot(tsne_df, aes(x = V1, y = V2, color = cluster)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "t-SNE with Hierarchical Clustering k=2",
+       x = "t-SNE 1",
+       y = "t-SNE 2",
+       color = "Cluster")
+```
+
+The above figure shows the result of using hierarchical cluster K=2 and K=3 in tnse respectively, we can see that in this result, using hierarchical cluster is not good enough to make a complete cluster of the data. therefore, we consider using kmeans in the next step. in the case of using kmeans, we first perform a PCA transformation on the data. The main purpose of PCA transformation is the same as that of tsne, which is to visualize the data in low dimensions.
+
+```{r}
+#could also use PCA to show the results.
+pca_result <- prcomp(numerical_x, scale. = TRUE)
+data_pca <- pca_result$x[, 1:2] 
+kmeans_result_pca <- kmeans(data_pca, centers = 2)
+data_pca_df <- as.data.frame(data_pca)
+data_pca_df$cluster <- factor(kmeans_result_pca$cluster)
+ggplot(data_pca_df, aes(PC1, PC2, color = cluster)) +
+  geom_point() +
+  theme_minimal()
+
+```
+
+
+Another approach is to use PCA for dimensionality reduction and then select the first two principal components for Kmeans analysis. The result on the figure shows the result of PCA analysis and the two clusters generated by Kmeans. 
+
+From both the t-SNE and the PCA with clustering analysis, we can see that there are indeed two main clusters that are not captured by any categorical variables. Generally, there should have a categorical variable that indicates the position of the player, however, in this dataset we didn't find it. Therefore, a reasonable assumption could be because of the goal keeper position that results in the two different clusters. Therefore, now we further check by plotting out the distribution of the goal keepers characteristics.
+
+```{r}
+plota <- ggplot(project_data_1, aes(x=gk_handling, y=value))+geom_point()
+plotb <- ggplot(project_data_1, aes(x=gk_positioning, y=value))+geom_point()
+plotc <- ggplot(project_data_1, aes(x=gk_diving, y=value))+geom_point()
+plotd <- ggplot(project_data_1, aes(x=gk_kicking, y=value))+geom_point()
+grid.arrange(plota,plotb,plotc,plotd,top="The player value versus the goal keeper characteristics")
+```
+
+Therefore, we added a new dummy variable which is called goal keeper, and the value is 1 if the gk_reflex variable is larger than 40 and 0 if the value is smaller than 40. 
+
+```{r}
+plota <- ggplot(project_data_1, aes(x=gk_handling, y=value,
+                              colour=as.factor(goal_keeper)))+geom_point()+labs(colour="Goal keeper")
+plotb <- ggplot(project_data_1, aes(x=gk_positioning, y=value,
+                              colour=as.factor(goal_keeper)))+geom_point()+labs(colour="Goal keeper")
+plotc <- ggplot(project_data_1, aes(x=gk_diving, y=value,
+                              colour=as.factor(goal_keeper)))+geom_point()+labs(colour="Goal keeper")
+plotd <- ggplot(project_data_1, aes(x=gk_kicking, y=value,
+                              colour=as.factor(goal_keeper)))+geom_point()+labs(colour="Goal keeper")
+grid.arrange(plota,plotb,plotc,plotd,top="The player value versus the goal keeper characteristics")
+```
+
+
+Therefore, by using the clustering analysis, we successively recgonized that there is some potential categorical structure in the data and added one categorical variable.
+
+Having learned that there is some degree of correlation and clustering in the data, this further justifies our use of the lasso and ridge methods. Next, we consider the analysis using lasso and ridge.
+
+Here, we first randomly split the data into a 75% training dataset and a 25% test dataset. After that, we run four models on the training dataset, which are Lasso and Ridge regression with the best parameter obtained by 10-fold cross validation, a regression with manual variable selection, and a regression with all numerical variables, and a linear model with all variables.
+
+After that, we train on each of these four models and then test them on the test set. And the RMSE is calculated to see the final predictive ability of the models by comparing the RMSE.
+
+```{r}
+#First split the data into training and testing
+set.seed(123)
+index <- sample(1:nrow(numerical_x), size = nrow(numerical_x)*0.75)
+training_x <- numerical_x[index,]
+training_y <- y[index]
+testing_x <- numerical_x[-index,]
+testing_y <- y[-index]
+```
+
+Run Lasso and ridge regression.
+
+```{r}
+cv_model_lasso <- cv.glmnet(as.matrix(training_x), training_y, alpha=1,
+                            nfolds = 10)
+cv_model_ridge <- cv.glmnet(as.matrix(training_x), training_y, alpha=0,
+                            nfolds = 10)
+
+```
+
+```{r}
+best_lambda_lasso <- cv_model_lasso$lambda.min
+best_lambda_lasso
+final_model_lasso <- glmnet(as.matrix(training_x), training_y, alpha = 1, 
+                            lambda = best_lambda_lasso)
+
+best_lambda_ridge <- cv_model_ridge$lambda.min
+best_lambda_ridge
+final_model_ridge <- glmnet(as.matrix(training_x), training_y, alpha = 0, 
+                            lambda = best_lambda_ridge)
+coef(final_model_ridge)
+coef(final_model_lasso)
+```
+
+
+Now conduct variable selection manually
+
+```{r}
+transformed_model <- lm(log(value) ~ . -player - country, data = project_data_1)
+
+p_values <- summary(transformed_model)$coefficients[, "Pr(>|t|)"]
+significant_variables <- names(p_values[p_values < 0.05 & names(p_values) != "(Intercept)"])
+
+
+
+training_df <- as.data.frame(training_x)
+training_df$y <- training_y
+# fit a linear model for comparison reason
+smallest_model2 <- lm(y ~ ., 
+                     data = training_df[, c("y", significant_variables)])
+```
+
+```{r}
+simple_linear_model <- lm(y~., data=training_df)
+#summary(simple_linear_model)
+#obtain linear, lasso and ridge calculation 
+lm_prediction <- predict(simple_linear_model,newdata = testing_x)
+lm_best_select_prediction <- predict(smallest_model2,newdata = testing_x)
+
+predictions_ridge <- predict(final_model_ridge, newx = as.matrix(testing_x))
+predictions_lasso <- predict(final_model_lasso, newx = as.matrix(testing_x))
+rmse_ridge <- sqrt(mean((testing_y - predictions_ridge)^2))
+rmse_lasso <- sqrt(mean((testing_y - predictions_lasso)^2))
+rmse_lm <- sqrt(mean((testing_y - lm_prediction)^2))
+rmse_lm_select <- sqrt(mean((testing_y - lm_best_select_prediction)^2))
+rmse_ridge
+rmse_lasso
+rmse_lm
+rmse_lm_select
+```
+From this final result, we can see that for the ridge regression, the best parameter obtained by cross validation is 0.1110505, which provides us with some regularization ability. For the lasso regression, the parameter of lambda is selected by cross validation with a value of 0.0007138406, and since this parameter is very close to 0, it can be assumed that the regularization ability of this model is relatively weak, and finally only the variable fk\_acc is shrinkage to 0.
+
+As for the results of the model evaluation in terms of RMSE, we can see that the model where the variable selection was performed manually has the lowest RMSE, except for the linear model and Lasso, although these two values are very close to each other. The worst result is the ridge, which indicates to us that the use of lasso and ridge may not be the best solution in this dataset, since lasso and ridge do not significantly improve the predictive power of the model.
+
+```{r}
+n = 5682
+
+
+
+cooks.distance(smallest_model2)[cooks.distance(smallest_model2) > 4 / n]
+
+finalmodel_noinfl = project_data_1[!(cooks.distance(smallest_model2) > 4 / n),]
+dim(finalmodel_noinfl)
+#After looking through our observations to see that 346 observations have a cooks distance greater
+#than 4/(number of observations)
+
+
+final_model_noinfl = lm(log(value) ~. -player -country, 
+                        data = finalmodel_noinfl)
+summary(final_model_noinfl)
+
+par(mfrow = c(2,2))
+plot(smallest_model2)
+plot(final_model_noinfl)
+```
+
+After looking through our observations to see that 346 observations have a cooks distance greater
+than 4/(number of observations). After this, we refitted a new model with 5,336 observations preformed diagnostics. From this we can see from the residual vs fitted plot that our residuals are much more consistent than before, following an almost flat line. 
+```{r}
+legendary = data.frame(player = c("Ronaldinho", "Thierry Henry", "John Terry", "Petr Cech"),
+                country=c("Brazil", "France", "England", "Czech Republic"),
+                height=c(180, 188, 187, 195),
+                weight=c(80, 83, 90, 92),
+                age=c(27, 30, 26, 25),
+                ball_control=c(97, 91, 65, 24),
+                dribbling=c(97, 92, 41, 20),
+                slide_tackle=c(28, 21, 93, 28),
+                stand_tackle=c(28, 21, 93, 28),
+                aggression=c(66, 40, 93, 67),
+                reactions=c(91, 92, 85, 83),
+                att_position=c(80, 80, 60, 40),
+                interceptions=c(28, 21, 93, 28),
+                vision=c(84, 87, 80, 57),
+                composure=c(83, 92, 85, 77),
+                crossing=c(83, 76, 41, 20),
+                short_pass=c(90, 86, 65, 25),
+                long_pass=c(85, 67, 61, 84),
+                acceleration=c(89, 94, 69, 53),
+                stamina=c(80, 83, 87, 48),
+                strength=c(76, 78, 93, 74),
+                balance=c(84, 87, 80, 57),
+                sprint_speed=c(91, 93, 71, 54),
+                agility=c(84, 87, 80, 57),
+                jumping=c(84, 87, 80, 57),
+                heading=c(66, 65, 94, 20),
+                shot_power=c(84, 86, 58, 21),
+                finishing=c(90, 95, 36, 20),
+                long_shots=c(93, 86, 33, 20),
+                curve=c(90, 95, 36, 20),
+                fk_acc=c(93, 89, 29, 19),
+                penalties=c(93, 89, 29, 19),
+                volleys=c(90, 95, 36, 20),
+                gk_positioning=c(22, 21, 23, 88),
+                gk_diving=c(12, 14, 7, 91),
+                gk_handling=c(22, 21, 23, 90),
+                gk_kicking=c(80, 80, 80, 80),
+                gk_reflexes=c(22, 21, 23, 92),
+                goal_keeper=c(0, 0, 0, 1))
+# Ensure 'player' is a factor with the same levels as in the training data
+legendary$player <- factor(legendary$player, levels = levels(final_model_noinfl$model$player))
+
+# Make predictions
+predictions <- predict(final_model_noinfl, newdata = legendary)
+
+# Display predictions of log values and real player values
+predictions
+exp(predictions)
+```
+We first researched a website to find the attributes of older, legendary players based on a older version of FIFA. I then filled in the values based on the attributes given on the website. There were missing attributes on the website that we needed for our model so the following rules were applied to fill in missing values. slide_tackle, stand_tackle and interceptions were filled using the value of tackling on the website. att_position was filled based on the players position, attackers got a 80, defenders got a 60 and goalkeepers got a 40. Vision, balance, agility and jumping were all the average of the physical attributes given on the website which were Acceleration, Stamina, Strength and Sprint Speed. Curve and Volleys were filled in based on the finsihing attribute of the player and finally penalties were filled using the fk\_acc attribute of the player. After filling the data frame out we predicted the value of the player in dollars using the optimal model we identified and the log values were printed out as "predictions". To find the player value in dollars that the model predicted we applied the inverse log function and we have that Ronaldinho would be valued at 85k dollars, Thierry Henry would be valued at 79k dollars, John Terry would be valued at 16k dollars and Petr Cech would be valued at 8k dollars. While these are high numbers they are still lower than the player values of the highest valued player nowadays like Kylian Mbappe valued at 153k dollars and Erling Haaland valued at 123k dollars.
